@@ -1,7 +1,13 @@
-
 #!/bin/bash
 
 IMAGE=linux-cx2072x
 
-docker build .
-docker cp ${IMAGE}-build-cont:/root/*.deb ../
+docker build -t ${IMAGE} .
+
+docker rm $(docker ps -aq --filter name=${IMAGE})
+
+docker create --name ${IMAGE} ${IMAGE}
+
+docker cp ${IMAGE}:/root/build ../
+
+docker rm $(docker ps -aq --filter name=${IMAGE})

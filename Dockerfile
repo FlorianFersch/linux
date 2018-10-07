@@ -18,4 +18,5 @@ RUN echo "CONFIG_SND_SOC_CX2072X=m" >> .config
 # build the kernel
 RUN make deb-pkg -j 12
 
-
+RUN mkdir /root/build
+RUN cp /root/*.deb /root/build/
