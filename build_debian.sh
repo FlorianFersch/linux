@@ -1,8 +1,8 @@
-#!/bin/bash
+git@github.com:heikomat/linux.git#!/bin/bash
 
-IMAGE=linux-cx2072x
+IMAGE=linux-cx2072x-debian
 
-docker build -t ${IMAGE} .
+docker build -t ${IMAGE} --file Dockerfile_debian .
 
 docker rm $(docker ps -aq --filter name=${IMAGE})
 
