@@ -908,12 +908,12 @@ int kernel_read_file(struct file *file, void **buf, loff_t *size,
 		goto out;
 
 	i_size = i_size_read(file_inode(file));
-	if (max_size > 0 && i_size > max_size) {
-		ret = -EFBIG;
-		goto out;
-	}
 	if (i_size <= 0) {
 		ret = -EINVAL;
+		goto out;
+	}
+	if (i_size > SIZE_MAX || (max_size > 0 && i_size > max_size)) {
+		ret = -EFBIG;
 		goto out;
 	}
 
@@ -1145,6 +1145,7 @@ static int de_thread(struct task_struct *tsk)
 		 */
 		tsk->pid = leader->pid;
 		change_pid(tsk, PIDTYPE_PID, task_pid(leader));
+		transfer_pid(leader, tsk, PIDTYPE_TGID);
 		transfer_pid(leader, tsk, PIDTYPE_PGID);
 		transfer_pid(leader, tsk, PIDTYPE_SID);
 

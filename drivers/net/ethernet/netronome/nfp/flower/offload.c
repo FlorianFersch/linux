@@ -1,35 +1,5 @@
-/*
- * Copyright (C) 2017 Netronome Systems, Inc.
- *
- * This software is dual licensed under the GNU General License Version 2,
- * June 1991 as shown in the file COPYING in the top-level directory of this
- * source tree or the BSD 2-Clause License provided below.  You have the
- * option to license this software under the complete terms of either license.
- *
- * The BSD 2-Clause License:
- *
- *     Redistribution and use in source and binary forms, with or
- *     without modification, are permitted provided that the following
- *     conditions are met:
- *
- *      1. Redistributions of source code must retain the above
- *         copyright notice, this list of conditions and the following
- *         disclaimer.
- *
- *      2. Redistributions in binary form must reproduce the above
- *         copyright notice, this list of conditions and the following
- *         disclaimer in the documentation and/or other materials
- *         provided with the distribution.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
- * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
- * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
- * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
- * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
- * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
- */
+// SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+/* Copyright (C) 2017-2018 Netronome Systems, Inc. */
 
 #include <linux/skbuff.h>
 #include <net/devlink.h>
@@ -66,6 +36,8 @@
 	 BIT(FLOW_DISSECTOR_KEY_ENC_IPV6_ADDRS) | \
 	 BIT(FLOW_DISSECTOR_KEY_ENC_CONTROL) | \
 	 BIT(FLOW_DISSECTOR_KEY_ENC_PORTS) | \
+	 BIT(FLOW_DISSECTOR_KEY_ENC_OPTS) | \
+	 BIT(FLOW_DISSECTOR_KEY_ENC_IP) | \
 	 BIT(FLOW_DISSECTOR_KEY_MPLS) | \
 	 BIT(FLOW_DISSECTOR_KEY_IP))
 
@@ -74,7 +46,9 @@
 	 BIT(FLOW_DISSECTOR_KEY_ENC_KEYID) | \
 	 BIT(FLOW_DISSECTOR_KEY_ENC_IPV4_ADDRS) | \
 	 BIT(FLOW_DISSECTOR_KEY_ENC_IPV6_ADDRS) | \
-	 BIT(FLOW_DISSECTOR_KEY_ENC_PORTS))
+	 BIT(FLOW_DISSECTOR_KEY_ENC_OPTS) | \
+	 BIT(FLOW_DISSECTOR_KEY_ENC_PORTS) | \
+	 BIT(FLOW_DISSECTOR_KEY_ENC_IP))
 
 #define NFP_FLOWER_WHITELIST_TUN_DISSECTOR_R \
 	(BIT(FLOW_DISSECTOR_KEY_ENC_CONTROL) | \
@@ -139,6 +113,21 @@ static bool nfp_flower_check_higher_than_mac(struct tc_cls_flower_offload *f)
 }
 
 static int
+nfp_flower_calc_opt_layer(struct flow_dissector_key_enc_opts *enc_opts,
+			  u32 *key_layer_two, int *key_size)
+{
+	if (enc_opts->len > NFP_FL_MAX_GENEVE_OPT_KEY)
+		return -EOPNOTSUPP;
+
+	if (enc_opts->len > 0) {
+		*key_layer_two |= NFP_FLOWER_LAYER2_GENEVE_OP;
+		*key_size += sizeof(struct nfp_flower_geneve_options);
+	}
+
+	return 0;
+}
+
+static int
 nfp_flower_calculate_key_layers(struct nfp_app *app,
 				struct nfp_fl_key_ls *ret_key_ls,
 				struct tc_cls_flower_offload *flow,
@@ -151,6 +140,7 @@ nfp_flower_calculate_key_layers(struct nfp_app *app,
 	u32 key_layer_two;
 	u8 key_layer;
 	int key_size;
+	int err;
 
 	if (flow->dissector->used_keys & ~NFP_FLOWER_WHITELIST_DISSECTOR)
 		return -EOPNOTSUPP;
@@ -172,10 +162,22 @@ nfp_flower_calculate_key_layers(struct nfp_app *app,
 		key_size += sizeof(struct nfp_flower_mac_mpls);
 	}
 
+	if (dissector_uses_key(flow->dissector, FLOW_DISSECTOR_KEY_VLAN)) {
+		struct flow_dissector_key_vlan *flow_vlan;
+
+		flow_vlan = skb_flow_dissector_target(flow->dissector,
+						      FLOW_DISSECTOR_KEY_VLAN,
+						      flow->mask);
+		if (!(priv->flower_ext_feats & NFP_FL_FEATS_VLAN_PCP) &&
+		    flow_vlan->vlan_priority)
+			return -EOPNOTSUPP;
+	}
+
 	if (dissector_uses_key(flow->dissector,
 			       FLOW_DISSECTOR_KEY_ENC_CONTROL)) {
 		struct flow_dissector_key_ipv4_addrs *mask_ipv4 = NULL;
 		struct flow_dissector_key_ports *mask_enc_ports = NULL;
+		struct flow_dissector_key_enc_opts *enc_op = NULL;
 		struct flow_dissector_key_ports *enc_ports = NULL;
 		struct flow_dissector_key_control *mask_enc_ctl =
 			skb_flow_dissector_target(flow->dissector,
@@ -212,11 +214,21 @@ nfp_flower_calculate_key_layers(struct nfp_app *app,
 		if (mask_enc_ports->dst != cpu_to_be16(~0))
 			return -EOPNOTSUPP;
 
+		if (dissector_uses_key(flow->dissector,
+				       FLOW_DISSECTOR_KEY_ENC_OPTS)) {
+			enc_op = skb_flow_dissector_target(flow->dissector,
+							   FLOW_DISSECTOR_KEY_ENC_OPTS,
+							   flow->key);
+		}
+
 		switch (enc_ports->dst) {
 		case htons(NFP_FL_VXLAN_PORT):
 			*tun_type = NFP_FL_TUNNEL_VXLAN;
 			key_layer |= NFP_FLOWER_LAYER_VXLAN;
 			key_size += sizeof(struct nfp_flower_ipv4_udp_tun);
+
+			if (enc_op)
+				return -EOPNOTSUPP;
 			break;
 		case htons(NFP_FL_GENEVE_PORT):
 			if (!(priv->flower_ext_feats & NFP_FL_FEATS_GENEVE))
@@ -226,6 +238,15 @@ nfp_flower_calculate_key_layers(struct nfp_app *app,
 			key_size += sizeof(struct nfp_flower_ext_meta);
 			key_layer_two |= NFP_FLOWER_LAYER2_GENEVE;
 			key_size += sizeof(struct nfp_flower_ipv4_udp_tun);
+
+			if (!enc_op)
+				break;
+			if (!(priv->flower_ext_feats & NFP_FL_FEATS_GENEVE_OPT))
+				return -EOPNOTSUPP;
+			err = nfp_flower_calc_opt_layer(enc_op, &key_layer_two,
+							&key_size);
+			if (err)
+				return err;
 			break;
 		default:
 			return -EOPNOTSUPP;
@@ -324,13 +345,29 @@ nfp_flower_calculate_key_layers(struct nfp_app *app,
 		    !(tcp_flags & (TCPHDR_FIN | TCPHDR_SYN | TCPHDR_RST)))
 			return -EOPNOTSUPP;
 
-		/* We need to store TCP flags in the IPv4 key space, thus
-		 * we need to ensure we include a IPv4 key layer if we have
-		 * not done so already.
+		/* We need to store TCP flags in the either the IPv4 or IPv6 key
+		 * space, thus we need to ensure we include a IPv4/IPv6 key
+		 * layer if we have not done so already.
 		 */
-		if (!(key_layer & NFP_FLOWER_LAYER_IPV4)) {
-			key_layer |= NFP_FLOWER_LAYER_IPV4;
-			key_size += sizeof(struct nfp_flower_ipv4);
+		if (!key_basic)
+			return -EOPNOTSUPP;
+
+		if (!(key_layer & NFP_FLOWER_LAYER_IPV4) &&
+		    !(key_layer & NFP_FLOWER_LAYER_IPV6)) {
+			switch (key_basic->n_proto) {
+			case cpu_to_be16(ETH_P_IP):
+				key_layer |= NFP_FLOWER_LAYER_IPV4;
+				key_size += sizeof(struct nfp_flower_ipv4);
+				break;
+
+			case cpu_to_be16(ETH_P_IPV6):
+				key_layer |= NFP_FLOWER_LAYER_IPV6;
+				key_size += sizeof(struct nfp_flower_ipv6);
+				break;
+
+			default:
+				return -EOPNOTSUPP;
+			}
 		}
 	}
 
@@ -377,8 +414,6 @@ nfp_flower_allocate_new(struct nfp_fl_key_ls *key_layer, bool egress)
 
 	flow_pay->nfp_tun_ipv4_addr = 0;
 	flow_pay->meta.flags = 0;
-	spin_lock_init(&flow_pay->lock);
-
 	flow_pay->ingress_offload = !egress;
 
 	return flow_pay;
@@ -457,14 +492,17 @@ nfp_flower_add_offload(struct nfp_app *app, struct net_device *netdev,
 	if (err)
 		goto err_destroy_flow;
 
+	flow_pay->tc_flower_cookie = flow->cookie;
+	err = rhashtable_insert_fast(&priv->flow_table, &flow_pay->fl_node,
+				     nfp_flower_table_params);
+	if (err)
+		goto err_release_metadata;
+
 	err = nfp_flower_xmit_flow(netdev, flow_pay,
 				   NFP_FLOWER_CMSG_TYPE_FLOW_ADD);
 	if (err)
-		goto err_destroy_flow;
+		goto err_remove_rhash;
 
-	INIT_HLIST_NODE(&flow_pay->link);
-	flow_pay->tc_flower_cookie = flow->cookie;
-	hash_add_rcu(priv->flow_table, &flow_pay->link, flow->cookie);
 	port->tc_offload_cnt++;
 
 	/* Deallocate flow payload when flower rule has been destroyed. */
@@ -472,6 +510,12 @@ nfp_flower_add_offload(struct nfp_app *app, struct net_device *netdev,
 
 	return 0;
 
+err_remove_rhash:
+	WARN_ON_ONCE(rhashtable_remove_fast(&priv->flow_table,
+					    &flow_pay->fl_node,
+					    nfp_flower_table_params));
+err_release_metadata:
+	nfp_modify_flow_metadata(app, flow_pay);
 err_destroy_flow:
 	kfree(flow_pay->action_data);
 	kfree(flow_pay->mask_data);
@@ -499,6 +543,7 @@ nfp_flower_del_offload(struct nfp_app *app, struct net_device *netdev,
 		       struct tc_cls_flower_offload *flow, bool egress)
 {
 	struct nfp_port *port = nfp_port_from_netdev(netdev);
+	struct nfp_flower_priv *priv = app->priv;
 	struct nfp_fl_payload *nfp_flow;
 	struct net_device *ingr_dev;
 	int err;
@@ -522,11 +567,13 @@ nfp_flower_del_offload(struct nfp_app *app, struct net_device *netdev,
 		goto err_free_flow;
 
 err_free_flow:
-	hash_del_rcu(&nfp_flow->link);
 	port->tc_offload_cnt--;
 	kfree(nfp_flow->action_data);
 	kfree(nfp_flow->mask_data);
 	kfree(nfp_flow->unmasked_data);
+	WARN_ON_ONCE(rhashtable_remove_fast(&priv->flow_table,
+					    &nfp_flow->fl_node,
+					    nfp_flower_table_params));
 	kfree_rcu(nfp_flow, rcu);
 	return err;
 }
@@ -547,8 +594,10 @@ static int
 nfp_flower_get_stats(struct nfp_app *app, struct net_device *netdev,
 		     struct tc_cls_flower_offload *flow, bool egress)
 {
+	struct nfp_flower_priv *priv = app->priv;
 	struct nfp_fl_payload *nfp_flow;
 	struct net_device *ingr_dev;
+	u32 ctx_id;
 
 	ingr_dev = egress ? NULL : netdev;
 	nfp_flow = nfp_flower_search_fl_table(app, flow->cookie, ingr_dev,
@@ -559,13 +608,16 @@ nfp_flower_get_stats(struct nfp_app *app, struct net_device *netdev,
 	if (nfp_flow->ingress_offload && egress)
 		return 0;
 
-	spin_lock_bh(&nfp_flow->lock);
-	tcf_exts_stats_update(flow->exts, nfp_flow->stats.bytes,
-			      nfp_flow->stats.pkts, nfp_flow->stats.used);
+	ctx_id = be32_to_cpu(nfp_flow->meta.host_ctx_id);
 
-	nfp_flow->stats.pkts = 0;
-	nfp_flow->stats.bytes = 0;
-	spin_unlock_bh(&nfp_flow->lock);
+	spin_lock_bh(&priv->stats_lock);
+	tcf_exts_stats_update(flow->exts, priv->stats[ctx_id].bytes,
+			      priv->stats[ctx_id].pkts,
+			      priv->stats[ctx_id].used);
+
+	priv->stats[ctx_id].pkts = 0;
+	priv->stats[ctx_id].bytes = 0;
+	spin_unlock_bh(&priv->stats_lock);
 
 	return 0;
 }
@@ -584,9 +636,9 @@ nfp_flower_repr_offload(struct nfp_app *app, struct net_device *netdev,
 		return nfp_flower_del_offload(app, netdev, flower, egress);
 	case TC_CLSFLOWER_STATS:
 		return nfp_flower_get_stats(app, netdev, flower, egress);
+	default:
+		return -EOPNOTSUPP;
 	}
-
-	return -EOPNOTSUPP;
 }
 
 int nfp_flower_setup_tc_egress_cb(enum tc_setup_type type, void *type_data,
@@ -631,14 +683,11 @@ static int nfp_flower_setup_tc_block(struct net_device *netdev,
 	if (f->binder_type != TCF_BLOCK_BINDER_TYPE_CLSACT_INGRESS)
 		return -EOPNOTSUPP;
 
-	if (tcf_block_shared(f->block))
-		return -EOPNOTSUPP;
-
 	switch (f->command) {
 	case TC_BLOCK_BIND:
 		return tcf_block_cb_register(f->block,
 					     nfp_flower_setup_tc_block_cb,
-					     repr, repr);
+					     repr, repr, f->extack);
 	case TC_BLOCK_UNBIND:
 		tcf_block_cb_unregister(f->block,
 					nfp_flower_setup_tc_block_cb,

@@ -473,7 +473,7 @@ static int nbd_send_cmd(struct nbd_device *nbd, struct nbd_cmd *cmd, int index)
 	u32 nbd_cmd_flags = 0;
 	int sent = nsock->sent, skip = 0;
 
-	iov_iter_kvec(&from, WRITE | ITER_KVEC, &iov, 1, sizeof(request));
+	iov_iter_kvec(&from, WRITE, &iov, 1, sizeof(request));
 
 	switch (req_op(req)) {
 	case REQ_OP_DISCARD:
@@ -564,8 +564,7 @@ send_pages:
 
 			dev_dbg(nbd_to_dev(nbd), "request %p: sending %d bytes data\n",
 				req, bvec.bv_len);
-			iov_iter_bvec(&from, ITER_BVEC | WRITE,
-				      &bvec, 1, bvec.bv_len);
+			iov_iter_bvec(&from, WRITE, &bvec, 1, bvec.bv_len);
 			if (skip) {
 				if (skip >= iov_iter_count(&from)) {
 					skip -= iov_iter_count(&from);
@@ -624,7 +623,7 @@ static struct nbd_cmd *nbd_read_stat(struct nbd_device *nbd, int index)
 	int ret = 0;
 
 	reply.magic = 0;
-	iov_iter_kvec(&to, READ | ITER_KVEC, &iov, 1, sizeof(reply));
+	iov_iter_kvec(&to, READ, &iov, 1, sizeof(reply));
 	result = sock_xmit(nbd, index, 0, &to, MSG_WAITALL, NULL);
 	if (result <= 0) {
 		if (!nbd_disconnected(config))
@@ -678,8 +677,7 @@ static struct nbd_cmd *nbd_read_stat(struct nbd_device *nbd, int index)
 		struct bio_vec bvec;
 
 		rq_for_each_segment(bvec, req, iter) {
-			iov_iter_bvec(&to, ITER_BVEC | READ,
-				      &bvec, 1, bvec.bv_len);
+			iov_iter_bvec(&to, READ, &bvec, 1, bvec.bv_len);
 			result = sock_xmit(nbd, index, 0, &to, MSG_WAITALL, NULL);
 			if (result <= 0) {
 				dev_err(disk_to_dev(nbd->disk), "Receive data failed (result %d)\n",
@@ -1073,7 +1071,7 @@ static void send_disconnects(struct nbd_device *nbd)
 	for (i = 0; i < config->num_connections; i++) {
 		struct nbd_sock *nsock = config->socks[i];
 
-		iov_iter_kvec(&from, WRITE | ITER_KVEC, &iov, 1, sizeof(request));
+		iov_iter_kvec(&from, WRITE, &iov, 1, sizeof(request));
 		mutex_lock(&nsock->tx_lock);
 		ret = sock_xmit(nbd, i, 1, &from, 0, NULL);
 		if (ret <= 0)
@@ -1239,6 +1237,9 @@ static int __nbd_ioctl(struct block_device *bdev, struct nbd_device *nbd,
 	case NBD_SET_SOCK:
 		return nbd_add_socket(nbd, arg, false);
 	case NBD_SET_BLKSIZE:
+		if (!arg || !is_power_of_2(arg) || arg < 512 ||
+		    arg > PAGE_SIZE)
+			return -EINVAL;
 		nbd_size_set(nbd, arg,
 			     div_s64(config->bytesize, arg));
 		return 0;
@@ -1633,7 +1634,7 @@ static int find_free_cb(int id, void *ptr, void *data)
 }
 
 /* Netlink interface. */
-static struct nla_policy nbd_attr_policy[NBD_ATTR_MAX + 1] = {
+static const struct nla_policy nbd_attr_policy[NBD_ATTR_MAX + 1] = {
 	[NBD_ATTR_INDEX]		=	{ .type = NLA_U32 },
 	[NBD_ATTR_SIZE_BYTES]		=	{ .type = NLA_U64 },
 	[NBD_ATTR_BLOCK_SIZE_BYTES]	=	{ .type = NLA_U64 },
@@ -1645,14 +1646,14 @@ static struct nla_policy nbd_attr_policy[NBD_ATTR_MAX + 1] = {
 	[NBD_ATTR_DEVICE_LIST]		=	{ .type = NLA_NESTED},
 };
 
-static struct nla_policy nbd_sock_policy[NBD_SOCK_MAX + 1] = {
+static const struct nla_policy nbd_sock_policy[NBD_SOCK_MAX + 1] = {
 	[NBD_SOCK_FD]			=	{ .type = NLA_U32 },
 };
 
 /* We don't use this right now since we don't parse the incoming list, but we
  * still want it here so userspace knows what to expect.
  */
-static struct nla_policy __attribute__((unused))
+static const struct nla_policy __attribute__((unused))
 nbd_device_policy[NBD_DEVICE_ATTR_MAX + 1] = {
 	[NBD_DEVICE_INDEX]		=	{ .type = NLA_U32 },
 	[NBD_DEVICE_CONNECTED]		=	{ .type = NLA_U8 },

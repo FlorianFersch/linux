@@ -25,7 +25,9 @@ static inline unsigned long long rdclock(void)
 	return ts.tv_sec * 1000000000ULL + ts.tv_nsec;
 }
 
+#ifndef MAX_NR_CPUS
 #define MAX_NR_CPUS			1024
+#endif
 
 extern const char *input_name;
 extern bool perf_host, perf_guest;
@@ -79,6 +81,7 @@ struct record_opts {
 	unsigned     initial_delay;
 	bool         use_clockid;
 	clockid_t    clockid;
+	u64          clockid_res_ns;
 	unsigned int proc_map_timeout;
 };
 

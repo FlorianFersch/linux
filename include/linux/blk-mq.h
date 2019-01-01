@@ -35,10 +35,12 @@ struct blk_mq_hw_ctx {
 	struct sbitmap		ctx_map;
 
 	struct blk_mq_ctx	*dispatch_from;
+	unsigned int		dispatch_busy;
 
-	struct blk_mq_ctx	**ctxs;
 	unsigned int		nr_ctx;
+	struct blk_mq_ctx	**ctxs;
 
+	spinlock_t		dispatch_wait_lock;
 	wait_queue_entry_t	dispatch_wait;
 	atomic_t		wait_index;
 
@@ -201,6 +203,10 @@ enum {
 struct request_queue *blk_mq_init_queue(struct blk_mq_tag_set *);
 struct request_queue *blk_mq_init_allocated_queue(struct blk_mq_tag_set *set,
 						  struct request_queue *q);
+struct request_queue *blk_mq_init_sq_queue(struct blk_mq_tag_set *set,
+						const struct blk_mq_ops *ops,
+						unsigned int queue_depth,
+						unsigned int set_flags);
 int blk_mq_register_dev(struct device *, struct request_queue *);
 void blk_mq_unregister_dev(struct device *, struct request_queue *);
 
